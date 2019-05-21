@@ -251,55 +251,60 @@ typedef struct IQUEUEHEAD iqueue_head;
 
 
 //=====================================================================
-// SEGMENT
+// SEGMENT  报文被拆分后的段
+// 详解 https://light0457.github.io/2016/10/18/Network/KCP/KCPSourceCodeRead/
 //=====================================================================
 struct IKCPSEG
 {
-	struct IQUEUEHEAD node;
-	IUINT32 conv;
-	IUINT32 cmd;
-	IUINT32 frg;
-	IUINT32 wnd;
-	IUINT32 ts;
-	IUINT32 sn;
-	IUINT32 una;
-	IUINT32 len;
-	IUINT32 resendts;
-	IUINT32 rto;
-	IUINT32 fastack;
-	IUINT32 xmit;
-	char data[1];
+	struct IQUEUEHEAD node;    // 多个报文段通过双向链表存储，node记录前一个和后一个Seg
+	IUINT32 conv;    // 用于两端匹配连接，相同的conv被认为是同一个连接的数据
+	IUINT32 cmd;     // command, 报文类型，一共有四种:IKCP_CMD_PUSH : 数据包,IKCP_CMD_ACK : ACK包,IKCP_CMD_WASK : 询问远端窗口大小,IKCP_CMD_WINS : 告诉远端自己的窗口大小
+	IUINT32 frg;     // fragment id, 用于报文拆分与重组，注意该编号并非从0开始，而且倒序。
+	IUINT32 wnd;     // 发送端当前可用窗口大小，用于流量控制
+	IUINT32 ts;      // 当前Segment发送时间戳，Seg发送的时候的时间
+	IUINT32 sn;      // sequence number, segment序号，表示一个连接中发送的所有seg的编号，ack中的对应的也是sn。sn表示的是一个连接中的seg的先后允许。而frg表示的一条消息的顺序，frg用于组装业务消息，而sn用于实现有序及重发。
+	IUINT32 una;     // unacknowledged, 表示期望对端发送的最小的Segment编号，也就是说小于该una的所有Segment都已经收到了。这个编号对应的是sn而不是frg.
+	IUINT32 len;     // 数据长度，及后面data长度
+	IUINT32 resendts; // 重发时间戳，如果当前时间超过了该时间戳，并且对端没有收到该报文，则重发该包。
+	IUINT32 rto;      // retransmission timeout, 超时重传时间，超过该时间如果对端没有收到，则重发报文，与上面的resendts区别？该值在发送出去时根据之前的网络情况进行设置？
+	IUINT32 fastack;  // 快速ack，用于快速重传，记录该包被ack跳过的次数，当超过配置的值时，该包将被重传
+	IUINT32 xmit;     // 该Segment发送次数，每次重发会加一。目前如果该值超过了配置的deadLink值，会返回EAGAIN?
+	char data[1];     // 有效数据载荷
 };
 
 
 //---------------------------------------------------------------------
-// IKCPCB
+// IKCPCB   KCP协议控制块，用于存储协议收发过程中使用的变量及数据
 //---------------------------------------------------------------------
 struct IKCPCB
 {
-	IUINT32 conv, mtu, mss, state;
-	IUINT32 snd_una, snd_nxt, rcv_nxt;
-	IUINT32 ts_recent, ts_lastack, ssthresh;
-	IINT32 rx_rttval, rx_srtt, rx_rto, rx_minrto;
-	IUINT32 snd_wnd, rcv_wnd, rmt_wnd, cwnd, probe;
-	IUINT32 current, interval, ts_flush, xmit;
-	IUINT32 nrcv_buf, nsnd_buf;
-	IUINT32 nrcv_que, nsnd_que;
-	IUINT32 nodelay, updated;
-	IUINT32 ts_probe, probe_wait;
-	IUINT32 dead_link, incr;
-	struct IQUEUEHEAD snd_queue;
-	struct IQUEUEHEAD rcv_queue;
-	struct IQUEUEHEAD snd_buf;
-	struct IQUEUEHEAD rcv_buf;
-	IUINT32 *acklist;
-	IUINT32 ackcount;
-	IUINT32 ackblock;
-	void *user;
-	char *buffer;
-	int fastresend;
-	int nocwnd, stream;
-	int logmask;
+	IUINT32 conv, mtu, mss, state;  //mtu:最大传输单元,mss:最大分片大小，state:连接状态,0表示正常
+	IUINT32 snd_una, snd_nxt, rcv_nxt;   // rcv_nxt (receive_next)待接收的包编号, snd_nxt:待发送的包编号, snd_una:第一个未确认的包
+	IUINT32 ts_recent, ts_lastack, ssthresh;  //ssthresh:拥塞窗口的阈值
+	IINT32 rx_rttval, rx_srtt, rx_rto, rx_minrto; //rx_rttval：ack接收rtt浮动值，rx_srtt：ack接收rtt平滑值(smoothed)，rx_rto：由ack接收延迟计算出来的重发时间，rx_minrto：最小重发时间
+	IUINT32 snd_wnd, rcv_wnd, rmt_wnd, cwnd, probe; //snd_wnd本地发送窗口，rcv_wnd 本地接收窗口，rmt_wnd远端接收窗口， cwnd:拥塞窗口大小，根据流控计算得到的窗口，probe表示当前是否需要探测窗口
+	IUINT32 current, interval, ts_flush, xmit;  //currunt：当前的时间戳，interval：内部flush刷新间隔，ts_flush：下次flush刷新时间戳，xmit当前连接已经重传包次数
+	IUINT32 nrcv_buf, nsnd_buf;    // nrcv_buf尚未接收的缓冲区buffer seg数量，nsnd_buf:尚未发送的缓冲区seg数量。当数据从snd_queue通过flush调用转移到snd_buf时，nsnd_buf++，nsnd_que--
+	IUINT32 nrcv_que, nsnd_que;    //not received queue count, not send queue count, 本地缓存的未被应用层接收的seg数量，本地缓存的没有发送到缓冲区的seg数量
+	IUINT32 nodelay, updated; //nodelay：是否启动无延迟模式，update：是否调用过update函数的标识(kcp需要上层通过不断的ikcp_update和ikcp_check来驱动kcp的收发过程)
+	IUINT32 ts_probe, probe_wait; //ts_probe：下次探查窗口的时间戳，probe_wait：探查窗口需要等待的时间
+	IUINT32 dead_link, incr; //dead_link：最大重传次数，incr：可发送的最大数据量
+
+	struct IQUEUEHEAD snd_queue;   // 发送队列，应用层调用 ikcp_send 后，数据将会进入到 snd_queue 中，而下层函数 ikcp_flush 将会决定将多少数据从 snd_queue 中移到 snd_buf 中，进行发送
+	struct IQUEUEHEAD rcv_queue;   // 接收队列
+	struct IQUEUEHEAD snd_buf;    // 发送缓冲区
+	struct IQUEUEHEAD rcv_buf;    // 接收缓冲区
+
+	IUINT32 *acklist;  // 当收到一个数据报文时，将其对应的 ACK 报文的 sn 号以及时间戳 ts 同时加入到acklist 中，即形成如 [sn1, ts1, sn2, ts2 …] 的列表；
+	IUINT32 ackcount;  // 记录 acklist 中存放的 ACK 报文的数量；
+	IUINT32 ackblock;  // acklist 数组的可用长度，当 acklist 的容量不足时，需要进行扩容；
+
+	void *user; // 语法:无类型指针，可以指向任意数据类型。 字段作用:
+	char *buffer;    // 作用？？？
+	int fastresend;   //快速重传阈值，大于0表示开启快速重传，值表示被跳过的次数，比如2表示某个包被跳过2次就立即重发
+	int nocwnd, stream; // 大于0表示开启快速重传，值表示被跳过的次数，比如2表示某个包被跳过2次就立即重发
+	int logmask;  // 日志相关
+
 	int (*output)(const char *buf, int len, struct IKCPCB *kcp, void *user);
 	void (*writelog)(const char *log, struct IKCPCB *kcp, void *user);
 };
